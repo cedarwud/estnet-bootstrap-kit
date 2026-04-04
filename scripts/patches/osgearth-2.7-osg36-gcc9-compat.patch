@@ -1,0 +1,333 @@
+diff --git a/src/applications/osgearth_createtile/osgearth_createtile.cpp b/src/applications/osgearth_createtile/osgearth_createtile.cpp
+index 5eac5fb0..9d171a7b 100644
+--- a/src/applications/osgearth_createtile/osgearth_createtile.cpp
++++ b/src/applications/osgearth_createtile/osgearth_createtile.cpp
+@@ -55,6 +55,10 @@ struct CollectTriangles
+     {
+         verts = new osg::Vec3Array();
+     }
++    inline void operator () (const osg::Vec3& v1,const osg::Vec3& v2,const osg::Vec3& v3)
++    {
++        this->operator()(v1, v2, v3, false);
++    }
+     inline void operator () (const osg::Vec3& v1,const osg::Vec3& v2,const osg::Vec3& v3, bool treatVertexDataAsTemporary)
+     {
+         verts->push_back(v1);
+diff --git a/src/osgEarth/DPLineSegmentIntersector.cpp b/src/osgEarth/DPLineSegmentIntersector.cpp
+index 7d2897b0..9f5ac865 100644
+--- a/src/osgEarth/DPLineSegmentIntersector.cpp
++++ b/src/osgEarth/DPLineSegmentIntersector.cpp
+@@ -89,6 +89,11 @@ namespace
+             _d /= _length;
+         }
+ 
++        inline void operator () (const osg::Vec3& v1,const osg::Vec3& v2,const osg::Vec3& v3)
++        {
++            this->operator()(v1, v2, v3, false);
++        }
++
+         inline void operator () (const osg::Vec3& v1,const osg::Vec3& v2,const osg::Vec3& v3, bool treatVertexDataAsTemporary)
+         {
+             ++_index;
+@@ -264,66 +269,8 @@ DPLineSegmentIntersector::intersect(osgUtil::IntersectionVisitor& iv, osg::Drawa
+ 
+     if (iv.getDoDummyTraversal()) return;
+ 
+-    osg::KdTree* kdTree = iv.getUseKdTreeWhenAvailable() ? dynamic_cast<osg::KdTree*>(drawable->getShape()) : 0;
+-    if (kdTree)
+-    {
+-        osg::KdTree::LineSegmentIntersections intersections;
+-        intersections.reserve(4);
+-        if (kdTree->intersect(s,e,intersections))
+-        {
+-            // OSG_NOTICE<<"Got KdTree intersections"<<std::endl;
+-            for(osg::KdTree::LineSegmentIntersections::iterator itr = intersections.begin();
+-                itr != intersections.end();
+-                ++itr)
+-            {
+-                osg::KdTree::LineSegmentIntersection& lsi = *(itr);
+-
+-                // get ratio in s,e range
+-                double ratio = lsi.ratio;
+-
+-                // remap ratio into _start, _end range
+-                double remap_ratio = ((s-_start).length() + ratio * (e-s).length() )/(_end-_start).length();
+-
+-
+-                Intersection hit;
+-                hit.ratio = remap_ratio;
+-                hit.matrix = iv.getModelMatrix();
+-                hit.nodePath = iv.getNodePath();
+-                hit.drawable = drawable;
+-                hit.primitiveIndex = lsi.primitiveIndex;
+-
+-                hit.localIntersectionPoint = _start*(1.0-remap_ratio) + _end*remap_ratio;
+-
+-                // OSG_NOTICE<<"KdTree: ratio="<<hit.ratio<<" ("<<hit.localIntersectionPoint<<")"<<std::endl;
+-
+-                hit.localIntersectionNormal = lsi.intersectionNormal;
+-
+-                hit.indexList.reserve(3);
+-                hit.ratioList.reserve(3);
+-                if (lsi.r0!=0.0f)
+-                {
+-                    hit.indexList.push_back(lsi.p0);
+-                    hit.ratioList.push_back(lsi.r0);
+-                }
+-
+-                if (lsi.r1!=0.0f)
+-                {
+-                    hit.indexList.push_back(lsi.p1);
+-                    hit.ratioList.push_back(lsi.r1);
+-                }
+-
+-                if (lsi.r2!=0.0f)
+-                {
+-                    hit.indexList.push_back(lsi.p2);
+-                    hit.ratioList.push_back(lsi.r2);
+-                }
+-
+-                insertIntersection(hit);
+-            }
+-        }
+-
+-        return;
+-    }
++    // OSG 3.6 removed the KdTree LineSegmentIntersections API this file used.
++    // Fall back to generic triangle traversal for compatibility.
+ 
+     // GW: changed this ONE line
+     osg::TriangleFunctor<DoublePrecisionTriangleIntersector> ti;
+diff --git a/src/osgEarth/Decluttering.cpp b/src/osgEarth/Decluttering.cpp
+index 6ee6705b..98851bc0 100644
+--- a/src/osgEarth/Decluttering.cpp
++++ b/src/osgEarth/Decluttering.cpp
+@@ -796,7 +796,7 @@ DeclutterByPriority::operator()(const osgUtil::RenderLeaf* lhs, const osgUtil::R
+         return diff < 0.0f;
+ 
+     // then fallback on traversal order.
+-    diff = float(lhs->_traversalNumber) - float(rhs->_traversalNumber);
++    diff = float(lhs->_traversalOrderNumber) - float(rhs->_traversalOrderNumber);
+     return diff < 0.0f;
+ }
+ 
+diff --git a/src/osgEarth/ElevationQuery b/src/osgEarth/ElevationQuery
+index d8e4d140..88b9db3a 100644
+--- a/src/osgEarth/ElevationQuery
++++ b/src/osgEarth/ElevationQuery
+@@ -37,7 +37,7 @@ namespace osgEarth
+ 
+             void pruneUnusedDatabaseCache();
+ 
+-            virtual osg::Node* readNodeFile(const std::string& filename);
++            virtual osg::ref_ptr<osg::Node> readNodeFile(const std::string& filename);
+ 
+         protected:
+ 
+diff --git a/src/osgEarth/ElevationQuery.cpp b/src/osgEarth/ElevationQuery.cpp
+index 5fb8222c..08ce71ce 100644
+--- a/src/osgEarth/ElevationQuery.cpp
++++ b/src/osgEarth/ElevationQuery.cpp
+@@ -55,7 +55,7 @@ void ElevationQueryCacheReadCallback::pruneUnusedDatabaseCache()
+ {
+ }
+ 
+-osg::Node* ElevationQueryCacheReadCallback::readNodeFile(const std::string& filename)
++osg::ref_ptr<osg::Node> ElevationQueryCacheReadCallback::readNodeFile(const std::string& filename)
+ {
+     // first check to see if file is already loaded.
+     {
+@@ -71,7 +71,7 @@ osg::Node* ElevationQueryCacheReadCallback::readNodeFile(const std::string& file
+     }
+ 
+     // now load the file.
+-    osg::ref_ptr<osg::Node> node = osgDB::readNodeFile(filename);
++    osg::ref_ptr<osg::Node> node = osgDB::readRefNodeFile(filename);
+ 
+     // insert into the cache.
+     if (node.valid())
+diff --git a/src/osgEarth/NodeUtils.cpp b/src/osgEarth/NodeUtils.cpp
+index a3c147e0..dde057a9 100644
+--- a/src/osgEarth/NodeUtils.cpp
++++ b/src/osgEarth/NodeUtils.cpp
+@@ -247,6 +247,11 @@ namespace
+             _d /= _length;
+         }
+ 
++        inline void operator () (const osg::Vec3& v1,const osg::Vec3& v2,const osg::Vec3& v3)
++        {
++            this->operator()(v1, v2, v3, false);
++        }
++
+         inline void operator () (const osg::Vec3& v1,const osg::Vec3& v2,const osg::Vec3& v3, bool treatVertexDataAsTemporary)
+         {
+             ++_index;
+diff --git a/src/osgEarth/Registry.cpp b/src/osgEarth/Registry.cpp
+index c99250e0..9b5ee169 100644
+--- a/src/osgEarth/Registry.cpp
++++ b/src/osgEarth/Registry.cpp
+@@ -191,9 +191,7 @@ _cacheDriver        ( "filesystem" )
+     }
+     if ( _defaultFont.valid() )
+     {
+-        // mitigates mipmapping issues that cause rendering artifacts
+-        // for some fonts/placement
+-        _defaultFont->setGlyphImageMargin( 2 );
++        // OSG 3.6 no longer exposes glyph image margin tuning on osgText::Font.
+     }
+ 
+     // register the system stock Units.
+@@ -643,7 +641,6 @@ class RegisterEarthTileExtension
+ public:
+     RegisterEarthTileExtension()
+     {
+-        osg::Referenced::setThreadSafeReferenceCounting( true );
+         osgDB::Registry::instance()->addFileExtensionAlias("earth_tile", "earth");
+     }
+ };
+diff --git a/src/osgEarth/Utils b/src/osgEarth/Utils
+index 188e2554..49cfa62d 100644
+--- a/src/osgEarth/Utils
++++ b/src/osgEarth/Utils
+@@ -149,6 +149,14 @@ namespace osgEarth
+         bool   _dirty;
+         bool   _rotateInScreenSpace;
+         double _screenSpaceRotationRadians;
++        bool   _firstTimeToInitEyePoint;
++        bool   _matrixDirty;
++        osg::Viewport::value_type _previousWidth;
++        osg::Viewport::value_type _previousHeight;
++        osg::Vec3d _previousEyePoint;
++        osg::Vec3d _previousLocalUp;
++        osg::Matrixd _previousProjection;
++        osg::Vec3d _previousPosition;
+         osg::observer_ptr<osg::Node> _sizingNode;
+     };
+ 
+diff --git a/src/osgEarth/Utils.cpp b/src/osgEarth/Utils.cpp
+index 579d5b3c..f08914a0 100644
+--- a/src/osgEarth/Utils.cpp
++++ b/src/osgEarth/Utils.cpp
+@@ -44,8 +44,18 @@ void osgEarth::removeEventHandler(osgViewer::View* view, osgGA::GUIEventHandler*
+ 
+ PixelAutoTransform::PixelAutoTransform() :
+ osg::AutoTransform         (),
++_minPixels                 ( 0.0 ),
++_dirty                     ( true ),
+ _rotateInScreenSpace       ( false ),
+-_screenSpaceRotationRadians( 0.0 )
++_screenSpaceRotationRadians( 0.0 ),
++_firstTimeToInitEyePoint   ( true ),
++_matrixDirty               ( false ),
++_previousWidth             ( 0.0 ),
++_previousHeight            ( 0.0 ),
++_previousEyePoint          (),
++_previousLocalUp           (),
++_previousProjection        (),
++_previousPosition          ()
+ {
+     // deactivate culling for the first traversal. We will reactivate it later.
+     setCullingActive( false );
+diff --git a/src/osgEarthAnnotation/AnnotationUtils b/src/osgEarthAnnotation/AnnotationUtils
+index 6bf70f27..b9be6206 100644
+--- a/src/osgEarthAnnotation/AnnotationUtils
++++ b/src/osgEarthAnnotation/AnnotationUtils
+@@ -105,10 +105,30 @@ namespace osgEarth { namespace Annotation
+          */
+         struct OrthoNodeAutoTransform : public osg::AutoTransform
+         {
++            OrthoNodeAutoTransform() :
++                osg::AutoTransform(),
++                _firstTimeToInitEyePoint(true),
++                _matrixDirty(false),
++                _previousWidth(0.0),
++                _previousHeight(0.0),
++                _previousEyePoint(),
++                _previousLocalUp(),
++                _previousProjection(),
++                _previousPosition() { }
++
+             /** override */
+             virtual void accept(osg::NodeVisitor& nv);
+ 
+             bool okToIntersect() const { return !_firstTimeToInitEyePoint; }
++
++            bool _firstTimeToInitEyePoint;
++            bool _matrixDirty;
++            osg::Viewport::value_type _previousWidth;
++            osg::Viewport::value_type _previousHeight;
++            osg::Vec3d _previousEyePoint;
++            osg::Vec3d _previousLocalUp;
++            osg::Matrixd _previousProjection;
++            osg::Vec3d _previousPosition;
+         };
+ 
+         // some geometry creation utilities
+diff --git a/src/osgEarthAnnotation/AnnotationUtils.cpp b/src/osgEarthAnnotation/AnnotationUtils.cpp
+index 90ddee82..7ee4031f 100755
+--- a/src/osgEarthAnnotation/AnnotationUtils.cpp
++++ b/src/osgEarthAnnotation/AnnotationUtils.cpp
+@@ -140,9 +140,6 @@ AnnotationUtils::createTextDrawable(const std::string& text,
+     if ( symbol && symbol->font().isSet() )
+     {
+         font = osgText::readFontFile( *symbol->font() );
+-        // mitigates mipmapping issues that cause rendering artifacts for some fonts/placement
+-        if ( font )
+-          font->setGlyphImageMargin( 2 );
+     }
+     if ( !font )
+         font = Registry::instance()->getDefaultFont();
+diff --git a/src/osgEarthDrivers/engine_mp/MPGeometry.cpp b/src/osgEarthDrivers/engine_mp/MPGeometry.cpp
+index 50ad2657..50683bcc 100644
+--- a/src/osgEarthDrivers/engine_mp/MPGeometry.cpp
++++ b/src/osgEarthDrivers/engine_mp/MPGeometry.cpp
+@@ -565,7 +565,7 @@ MPGeometry::drawImplementation(osg::RenderInfo& renderInfo) const
+ 
+     bool hasVertexAttributes = !_vertexAttribList.empty();
+ 
+-    osg::ArrayDispatchers& arrayDispatchers = state.getArrayDispatchers();
++    osg::AttributeDispatchers& arrayDispatchers = state.getAttributeDispatchers();
+ 
+     arrayDispatchers.reset();
+     arrayDispatchers.setUseVertexAttribAlias(state.getUseVertexAttributeAliasing());
+@@ -595,8 +595,6 @@ MPGeometry::drawImplementation(osg::RenderInfo& renderInfo) const
+         }
+     }
+ 
+-    // dispatch any attributes that are bound overall
+-    arrayDispatchers.dispatch(BIND_OVERALL,0);
+     state.lazyDisablingOfVertexAttributes();
+ 
+ 
+diff --git a/src/osgEarthFeatures/TextSymbolizer.cpp b/src/osgEarthFeatures/TextSymbolizer.cpp
+index afa36b06..4424542b 100644
+--- a/src/osgEarthFeatures/TextSymbolizer.cpp
++++ b/src/osgEarthFeatures/TextSymbolizer.cpp
+@@ -85,9 +85,6 @@ TextSymbolizer::create(Feature*             feature,
+     if ( _symbol.valid() && _symbol->font().isSet() )
+     {
+         font = osgText::readFontFile( *_symbol->font() );
+-        // mitigates mipmapping issues that cause rendering artifacts for some fonts/placement
+-        if ( font )
+-            font->setGlyphImageMargin( 2 );
+     }
+     if ( !font )
+         font = Registry::instance()->getDefaultFont();
+@@ -115,4 +112,3 @@ TextSymbolizer::create(Feature*             feature,
+ 
+     return t;
+ }
+-
+diff --git a/src/osgEarthUtil/Controls.cpp b/src/osgEarthUtil/Controls.cpp
+index c6467bff..f4b05fef 100755
+--- a/src/osgEarthUtil/Controls.cpp
++++ b/src/osgEarthUtil/Controls.cpp
+@@ -703,7 +703,7 @@ namespace
+     {
+         LabelText() : osgText::Text() { setDataVariance(osg::Object::DYNAMIC); }
+         const osg::BoundingBox& getTextBB() const { return _textBB; }
+-        const osg::Matrix& getATMatrix(int contextID) const { return _autoTransformCache[contextID]._matrix; }
++        const osg::Matrix& getATMatrix(int /*contextID*/) const { return getMatrix(); }
+     };
+ 
+     // writes a value to a label

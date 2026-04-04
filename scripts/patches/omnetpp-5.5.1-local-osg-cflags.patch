@@ -1,0 +1,22 @@
+diff --git a/Makefile.inc.in b/Makefile.inc.in
+index 75bc1ada9e..16f125f180 100644
+--- a/Makefile.inc.in
++++ b/Makefile.inc.in
+@@ -250,10 +250,12 @@ endif
+ 
+ # note: defines for OSG and osgEarth must be available even if WITH_QTENV=no
+ ifeq ($(WITH_OSG),yes)
++  CFLAGS += $(OSG_CFLAGS)
+   DEFINES += -DWITH_OSG
+ endif
+ 
+ ifeq ($(WITH_OSGEARTH),yes)
++  CFLAGS += $(OSGEARTH_CFLAGS)
+   DEFINES += -DWITH_OSGEARTH
+ endif
+ 
+@@ -279,4 +281,3 @@ else
+   # extra libraries needed when statically linking (because of indirect dependencies)
+   KERNEL_LIBS += -loppnedxml$D -loppcommon$D $(XML_LIBS)
+ endif
+-

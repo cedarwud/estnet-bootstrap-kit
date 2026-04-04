@@ -1,0 +1,19 @@
+diff --git a/simulations/configs/orbit_18sat_walker.incl b/simulations/configs/orbit_18sat_walker.incl
+--- a/simulations/configs/orbit_18sat_walker.incl
++++ b/simulations/configs/orbit_18sat_walker.incl
+@@ -1,5 +1,6 @@
+ # SATELLITE ORBITS
+ *.numS = 18
+ *.sat[*].networkHost.mobility.positionPropagatorType = "PositionPropagatorSGP4File"
+ # 6 orbital planes, 3 sat on each plane, 45deg inclination, height 698km
+ *.sat[*].networkHost.mobility.positionPropagator.tleFile = "./configs/tles/walker_o6_s3_i45_h698.tle"
++*.globalJulianDate.tleFile = "./configs/tles/walker_o6_s3_i45_h698.tle"
+diff --git a/simulations/configs/orbit_uwe3.incl b/simulations/configs/orbit_uwe3.incl
+--- a/simulations/configs/orbit_uwe3.incl
++++ b/simulations/configs/orbit_uwe3.incl
+@@ -1,4 +1,5 @@
+ # SATELLITE ORBITS
+ *.numS = 1
+ *.sat[*].networkHost.mobility.positionPropagatorType = "PositionPropagatorSGP4File"
+ *.sat[*].networkHost.mobility.positionPropagator.tleFile = "./configs/tles/UWE3.tle"
++*.globalJulianDate.tleFile = "./configs/tles/UWE3.tle"
