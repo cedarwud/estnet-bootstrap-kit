@@ -329,11 +329,107 @@ def aligned_axis_series(
     if timestamps != [item[0] for item in y_series] or timestamps != [item[0] for item in z_series]:
         raise ProducerError(f"Module '{module_name}' has mismatched timestamps across X/Y/Z ECI series.")
 
-    return (
+    return deduplicate_aligned_series(
         timestamps,
         [item[1] for item in x_series],
         [item[1] for item in y_series],
         [item[1] for item in z_series],
+    )
+
+
+def deduplicate_aligned_series(
+    timestamps: list[int],
+    xs: list[float],
+    ys: list[float],
+    zs: list[float],
+) -> tuple[list[int], list[float], list[float], list[float]]:
+    dedup_timestamps: list[int] = []
+    dedup_xs: list[float] = []
+    dedup_ys: list[float] = []
+    dedup_zs: list[float] = []
+
+    for timestamp, x_value, y_value, z_value in zip(timestamps, xs, ys, zs):
+        if dedup_timestamps and timestamp == dedup_timestamps[-1]:
+            dedup_xs[-1] = x_value
+            dedup_ys[-1] = y_value
+            dedup_zs[-1] = z_value
+            continue
+        dedup_timestamps.append(timestamp)
+        dedup_xs.append(x_value)
+        dedup_ys.append(y_value)
+        dedup_zs.append(z_value)
+
+    return dedup_timestamps, dedup_xs, dedup_ys, dedup_zs
+
+
+def interpolate_axis_series(
+    reference_timestamps: list[int],
+    source_timestamps: list[int],
+    source_values: list[float],
+    module_name: str,
+    axis_name: str,
+) -> list[float]:
+    if reference_timestamps == source_timestamps:
+        return source_values
+    if not source_timestamps:
+        raise ProducerError(f"Module '{module_name}' does not contain any samples for axis '{axis_name}'.")
+
+    if reference_timestamps[0] < source_timestamps[0] or reference_timestamps[-1] > source_timestamps[-1]:
+        raise ProducerError(
+            f"Module '{module_name}' does not cover the shared timestamp window for axis '{axis_name}'."
+        )
+
+    interpolated: list[float] = []
+    source_index = 0
+
+    for target_timestamp in reference_timestamps:
+        while (
+            source_index + 1 < len(source_timestamps)
+            and source_timestamps[source_index + 1] < target_timestamp
+        ):
+            source_index += 1
+
+        left_timestamp = source_timestamps[source_index]
+        left_value = source_values[source_index]
+        if left_timestamp == target_timestamp:
+            interpolated.append(left_value)
+            continue
+
+        if source_index + 1 >= len(source_timestamps):
+            raise ProducerError(
+                f"Module '{module_name}' cannot interpolate axis '{axis_name}' at timestamp {target_timestamp}."
+            )
+
+        right_timestamp = source_timestamps[source_index + 1]
+        right_value = source_values[source_index + 1]
+        if right_timestamp == target_timestamp:
+            interpolated.append(right_value)
+            continue
+
+        span = right_timestamp - left_timestamp
+        if span <= 0:
+            raise ProducerError(
+                f"Module '{module_name}' has a non-increasing timestamp sequence for axis '{axis_name}'."
+            )
+
+        ratio = (target_timestamp - left_timestamp) / span
+        interpolated.append(left_value + (right_value - left_value) * ratio)
+
+    return interpolated
+
+
+def align_satellite_series_to_reference(
+    reference_timestamps: list[int],
+    source_timestamps: list[int],
+    xs: list[float],
+    ys: list[float],
+    zs: list[float],
+    module_name: str,
+) -> tuple[list[float], list[float], list[float]]:
+    return (
+        interpolate_axis_series(reference_timestamps, source_timestamps, xs, module_name, "eciPositionX:vector"),
+        interpolate_axis_series(reference_timestamps, source_timestamps, ys, module_name, "eciPositionY:vector"),
+        interpolate_axis_series(reference_timestamps, source_timestamps, zs, module_name, "eciPositionZ:vector"),
     )
 
 
@@ -360,7 +456,7 @@ def derive_active_path(
     endpoint_ids: list[str],
     satellites_ecef: list[tuple[int, str, tuple[float, float, float]]],
     round_digits: int,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     candidates: list[tuple[float, float, int, str, dict[str, float]]] = []
     for native_index, satellite_id, satellite_ecef in satellites_ecef:
         endpoint_elevations = {
@@ -386,12 +482,7 @@ def derive_active_path(
         )
 
     if not candidates:
-        endpoint_summary = ", ".join(endpoint_ids)
-        raise ProducerError(
-            "Could not derive a common single-hop activePath from producer truth: "
-            f"no satellite stayed above {ACTIVE_PATH_MIN_ELEVATION_DEG:.1f} deg elevation for both endpoints "
-            f"({endpoint_summary})."
-        )
+        return None, None
 
     min_elevation, _sum_elevation, _tie_breaker, satellite_id, endpoint_elevations = max(
         candidates,
@@ -516,20 +607,36 @@ def command_export(args: argparse.Namespace) -> int:
             )
 
         reference_timestamps: list[int] | None = None
-        series_by_satellite: dict[int, tuple[list[float], list[float], list[float]]] = {}
+        satellite_modules_by_index: dict[int, str] = {}
+        source_series_by_satellite: dict[int, tuple[list[int], list[float], list[float], list[float]]] = {}
 
         for native_index, module_name in satellite_modules:
             timestamps, xs, ys, zs = aligned_axis_series(connection, module_name)
+            satellite_modules_by_index[native_index] = module_name
             if reference_timestamps is None:
                 reference_timestamps = timestamps
-            elif reference_timestamps != timestamps:
-                raise ProducerError(
-                    f"Satellite module '{module_name}' does not share the same timestamp grid as the first satellite."
-                )
-            series_by_satellite[native_index] = (xs, ys, zs)
+            source_series_by_satellite[native_index] = (timestamps, xs, ys, zs)
 
     if reference_timestamps is None or not reference_timestamps:
         raise ProducerError("No mobility timestamps were available for replay export.")
+
+    common_start = max(timestamps[0] for timestamps, _xs, _ys, _zs in source_series_by_satellite.values())
+    common_end = min(timestamps[-1] for timestamps, _xs, _ys, _zs in source_series_by_satellite.values())
+    reference_timestamps = [timestamp for timestamp in reference_timestamps if common_start <= timestamp <= common_end]
+    if not reference_timestamps:
+        raise ProducerError("Satellite mobility series do not share any common timestamp window for replay export.")
+
+    series_by_satellite: dict[int, tuple[list[float], list[float], list[float]]] = {}
+    for native_index, _module_name in satellite_modules:
+        source_timestamps, xs, ys, zs = source_series_by_satellite[native_index]
+        series_by_satellite[native_index] = align_satellite_series_to_reference(
+            reference_timestamps,
+            source_timestamps,
+            xs,
+            ys,
+            zs,
+            satellite_modules_by_index[native_index],
+        )
 
     first_frame_id = args.first_frame_id
     last_frame_id = first_frame_id + len(reference_timestamps) - 1
@@ -591,20 +698,21 @@ def command_export(args: argparse.Namespace) -> int:
             satellites_ecef=satellites_ecef,
             round_digits=args.round_digits,
         )
-        active_path_frame_count += 1
-        if active_path["satelliteId"] not in active_path_satellite_ids:
-            active_path_satellite_ids.append(active_path["satelliteId"])
-        min_common_elevation = active_path_details["minCommonElevationDeg"]
-        min_common_elevation_deg = (
-            min_common_elevation
-            if min_common_elevation_deg is None
-            else min(min_common_elevation_deg, min_common_elevation)
-        )
-        max_common_elevation_deg = (
-            min_common_elevation
-            if max_common_elevation_deg is None
-            else max(max_common_elevation_deg, min_common_elevation)
-        )
+        if active_path is not None and active_path_details is not None:
+            active_path_frame_count += 1
+            if active_path["satelliteId"] not in active_path_satellite_ids:
+                active_path_satellite_ids.append(active_path["satelliteId"])
+            min_common_elevation = active_path_details["minCommonElevationDeg"]
+            min_common_elevation_deg = (
+                min_common_elevation
+                if min_common_elevation_deg is None
+                else min(min_common_elevation_deg, min_common_elevation)
+            )
+            max_common_elevation_deg = (
+                min_common_elevation
+                if max_common_elevation_deg is None
+                else max(max_common_elevation_deg, min_common_elevation)
+            )
 
         frame_payload = {
             "schemaVersion": FRAME_SCHEMA_VERSION,
@@ -613,13 +721,16 @@ def command_export(args: argparse.Namespace) -> int:
             "frameId": frame_id,
             "simTimeSec": round(sim_time_sec, args.round_digits),
             "satellites": satellites,
-            "activePath": active_path,
         }
+        # Phase 03 viewer baseline can consume activePath when present, but long-duration
+        # orbit datasets are still valid when no single-hop common-visible relay exists.
+        if active_path is not None:
+            frame_payload["activePath"] = active_path
         json_dump(frames_dir / f"frame-{frame_id:0{args.frame_file_digits}d}.json", frame_payload)
 
     if metadata_out is not None:
         active_path_summary = {
-            "requiredInEveryFrame": True,
+            "requiredInEveryFrame": False,
             "selectionMethod": ACTIVE_PATH_SELECTION_METHOD,
             "visibilityThresholdDeg": ACTIVE_PATH_MIN_ELEVATION_DEG,
             "endpointIds": args.endpoint_ids,
@@ -763,25 +874,27 @@ def validate_frames(manifest: dict[str, Any], dataset_dir: Path) -> tuple[list[s
             errors.append(f"{frame_path.name}: satellite id ordering is not stable across frames")
 
         active_path = frame.get("activePath")
-        if not isinstance(active_path, dict):
-            errors.append(f"{frame_path.name}: activePath must be an object")
-        else:
-            endpoint_ids = active_path.get("endpointIds")
-            satellite_id = active_path.get("satelliteId")
-            if endpoint_ids != expected_endpoint_ids:
-                errors.append(
-                    f"{frame_path.name}: activePath.endpointIds expected {expected_endpoint_ids!r} but found {endpoint_ids!r}"
-                )
-            if not isinstance(satellite_id, str):
-                errors.append(f"{frame_path.name}: activePath.satelliteId must be a string")
-            elif satellite_id not in current_satellite_ids:
-                errors.append(
-                    f"{frame_path.name}: activePath.satelliteId {satellite_id!r} is not present in this frame's satellites[] snapshot"
-                )
+        if active_path is not None:
+            if not isinstance(active_path, dict):
+                errors.append(f"{frame_path.name}: activePath must be an object")
+                active_path = None
             else:
-                frame_metrics["activePathFrameCount"] += 1
-                if satellite_id not in active_path_satellite_ids:
-                    active_path_satellite_ids.append(satellite_id)
+                endpoint_ids = active_path.get("endpointIds")
+                satellite_id = active_path.get("satelliteId")
+                if endpoint_ids != expected_endpoint_ids:
+                    errors.append(
+                        f"{frame_path.name}: activePath.endpointIds expected {expected_endpoint_ids!r} but found {endpoint_ids!r}"
+                    )
+                if not isinstance(satellite_id, str):
+                    errors.append(f"{frame_path.name}: activePath.satelliteId must be a string")
+                elif satellite_id not in current_satellite_ids:
+                    errors.append(
+                        f"{frame_path.name}: activePath.satelliteId {satellite_id!r} is not present in this frame's satellites[] snapshot"
+                    )
+                else:
+                    frame_metrics["activePathFrameCount"] += 1
+                    if satellite_id not in active_path_satellite_ids:
+                        active_path_satellite_ids.append(satellite_id)
 
         frame_metrics["frameCount"] += 1
         frame_metrics["firstSimTimeSec"] = frame["simTimeSec"] if frame_metrics["firstSimTimeSec"] is None else frame_metrics["firstSimTimeSec"]
@@ -931,7 +1044,7 @@ def command_validate(args: argparse.Namespace) -> int:
         },
         "frameMetrics": frame_metrics,
         "activePathContract": {
-            "required": True,
+            "required": False,
             "selectionMethod": ACTIVE_PATH_SELECTION_METHOD,
             "endpointIds": manifest.get("endpointIds"),
             "frameCountWithActivePath": frame_metrics.get("activePathFrameCount"),

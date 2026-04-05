@@ -8,8 +8,8 @@
 
 1. 建立 `18 sat walker + 2 endpoints` reference scenario
 2. 以 release build 跑 headless producer simulation
-3. 從 SQLite `.vec` 匯出 `EstnetReplayPackageV1`，並在每個 frame 補最小 `activePath`
-4. 驗證 manifest / frame contract、`activePath` contract 與 native node identity mapping
+3. 從 SQLite `.vec` 匯出 `EstnetReplayPackageV1`，並在可推導單跳 relay 的 frame 補最小 `activePath`
+4. 驗證 manifest / frame contract、可選 `activePath` contract 與 native node identity mapping
 5. 把 raw result、dataset、report 都留在 ignored workspace 路徑
 
 ## Main Entrypoint
@@ -84,9 +84,10 @@ state/reference-producer/
 6. `coordinateFrame = ntpu-local-enu-v1`
 7. `endpointIds = ["endpoint-a", "endpoint-b"]`
 8. `satellites[]` 採完整 snapshot，不做 sparse delta
-9. 每個 frame 都必須帶：
-   - `activePath.endpointIds = ["endpoint-a", "endpoint-b"]`
-   - `activePath.satelliteId = "sat-xx"`
+9. `activePath` 在 frame-level 是 optional：
+   - 若該 frame 可推導單跳 relay，則帶 `activePath.endpointIds = ["endpoint-a", "endpoint-b"]`
+   - 若該 frame 不存在 common-visible single-hop relay，則省略 `activePath`
+   - 若帶 `activePath`，其 `activePath.satelliteId` 必須引用同一 frame `satellites[]` 內的 `sat-xx`
 
 ## Active Path Derivation Method
 
