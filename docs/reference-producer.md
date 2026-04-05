@@ -8,8 +8,8 @@
 
 1. 建立 `18 sat walker + 2 endpoints` reference scenario
 2. 以 release build 跑 headless producer simulation
-3. 從 SQLite `.vec` 匯出 `EstnetReplayPackageV1`
-4. 驗證 manifest / frame contract 與 native node identity mapping
+3. 從 SQLite `.vec` 匯出 `EstnetReplayPackageV1`，並在每個 frame 補最小 `activePath`
+4. 驗證 manifest / frame contract、`activePath` contract 與 native node identity mapping
 5. 把 raw result、dataset、report 都留在 ignored workspace 路徑
 
 ## Main Entrypoint
@@ -74,7 +74,7 @@ state/reference-producer/
 
 ## Frozen Contract Alignment
 
-目前 exporter 直接對齊 viewer 已凍結的 `Phase 02` contract：
+目前 exporter 直接對齊 viewer 已凍結的 `Phase 02` contract，並補上 viewer `Phase 03` path overlay 已經在用的最小 `activePath` 延伸欄位：
 
 1. `manifest.json` 為唯一 entrypoint
 2. frame 命名固定為六位數 zero-padded
@@ -84,6 +84,43 @@ state/reference-producer/
 6. `coordinateFrame = ntpu-local-enu-v1`
 7. `endpointIds = ["endpoint-a", "endpoint-b"]`
 8. `satellites[]` 採完整 snapshot，不做 sparse delta
+9. 每個 frame 都必須帶：
+   - `activePath.endpointIds = ["endpoint-a", "endpoint-b"]`
+   - `activePath.satelliteId = "sat-xx"`
+
+## Active Path Derivation Method
+
+目前 reference producer run 可用的穩定 truth 來源是：
+
+1. result DB 內每顆 satellite 的 `eciPositionX/Y/Z:vector`
+2. control-layer 生成的 scenario ini 中兩個 endpoint 的固定 identity 與 geodetic placement
+
+目前沒有直接拿來當 `activePath` truth 的 packet/routing 訊號，原因是：
+
+1. reference run 只跑到 `60s`
+2. template 內目前唯一明確打開的 app traffic 從 `180s` 才開始
+3. 因此 `throughput` / `radio state` 類向量不能安全代表「這一幀哪顆 satellite 正在 serving 兩個 endpoint」
+
+因此這一輪採最小、可重跑、producer-side 的單跳推導：
+
+1. 先把每一幀 satellite 的 ECI mobility truth 轉成 ECEF / `ntpu-local-enu-v1`
+2. 以 `scenario/reference-producer.ini` 中的 `endpoint-a` / `endpoint-b` geodetic placement 為 ground truth
+3. 對每顆 satellite 分別計算它相對兩個 endpoint 的 elevation angle
+4. 只保留「同時對兩個 endpoint 都高於地平線」的 common-visible candidates
+5. 從 candidates 中選出共同最小 elevation 最高的那一顆，作為這一幀的單跳 relay
+
+匯出的最小形狀如下：
+
+```json
+{
+  "activePath": {
+    "endpointIds": ["endpoint-a", "endpoint-b"],
+    "satelliteId": "sat-16"
+  }
+}
+```
+
+這不是完整 routing report，也不是 link-budget / KPI / event payload。它只負責讓 golden replay dataset 可以直接驅動 viewer 既有的 path overlay。
 
 ## Endpoint Mapping Validation Method
 
@@ -134,16 +171,17 @@ state/reference-producer/
 `validation-report.json` 目前會給出：
 
 1. `packageValid`
-2. `mappingValid`
-3. `goldenDatasetReady`
-4. `blockers[]`
+2. `activePathContract`
+3. `mappingValid`
+4. `goldenDatasetReady`
+5. `blockers[]`
 
 若卡住，請用下列分類回報：
 
 1. `scenario/config`
-   - ground node label、endpoint geodetic placement、satellite count 或 TLE target 不符合預期
+   - ground node label、endpoint geodetic placement、satellite count、TLE target，或該 scenario 根本無法在每個 frame 提供 common-visible relay
 2. `exporter hook`
-   - manifest / frame layout、frame sequence、satellite snapshot 或 JSON payload 有誤
+   - manifest / frame layout、frame sequence、satellite snapshot、`activePath` payload 或 JSON payload 有誤
 3. `contract ambiguity`
    - viewer frozen contract 與 producer-side truth 邊界本身不清楚
 4. `framework-level blocker`
@@ -159,6 +197,7 @@ python3 ./tools/reference_producer.py export \
   --tle-file <path/to/walker_o6_s3_i45_h698.tle> \
   --output-dir <dataset-dir> \
   --metadata-out <report-path> \
+  --scenario-ini <path/to/reference-producer.ini> \
   --dataset-id ntpu-2-endpoints-via-leo-18sat-walker-v1
 ```
 
@@ -166,5 +205,6 @@ python3 ./tools/reference_producer.py export \
 python3 ./tools/reference_producer.py validate \
   --dataset-dir <dataset-dir> \
   --vector-db <path/to/ReferenceProducer-0.vec> \
+  --scenario-ini <path/to/reference-producer.ini> \
   --report-out <validation-report-path>
 ```

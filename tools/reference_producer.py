@@ -22,6 +22,11 @@ SIMTIME_RAW_PER_SEC = 1_000_000_000_000
 TLE_YEAR_SPLIT = 57
 DEFAULT_ROUND_DIGITS = 3
 DEFAULT_MAPPING_TOLERANCE_M = 1.0
+ACTIVE_PATH_MIN_ELEVATION_DEG = 0.0
+ACTIVE_PATH_SELECTION_METHOD = (
+    "Select the single-hop relay with the highest minimum elevation angle "
+    "among satellites visible from both endpoints."
+)
 
 ANCHOR_LAT_DEG = 24.9441667
 ANCHOR_LON_DEG = 121.3713889
@@ -192,19 +197,21 @@ def project_geodetic_to_enu(
     return project_ecef_to_enu(x, y, z, anchor_lat_deg, anchor_lon_deg, anchor_alt_m)
 
 
-def project_eci_to_enu(
-    x: float,
-    y: float,
-    z: float,
-    sim_time_sec: float,
-    base_julian_date: float,
-    anchor_lat_deg: float,
-    anchor_lon_deg: float,
-    anchor_alt_m: float,
-) -> tuple[float, float, float]:
-    julian_date = base_julian_date + sim_time_sec / 86400.0
-    ecef_x, ecef_y, ecef_z = eci_to_ecef(x, y, z, julian_date)
-    return project_ecef_to_enu(ecef_x, ecef_y, ecef_z, anchor_lat_deg, anchor_lon_deg, anchor_alt_m)
+def elevation_deg_to_target(
+    ground_lat_deg: float,
+    ground_lon_deg: float,
+    ground_alt_m: float,
+    target_ecef: tuple[float, float, float],
+) -> float:
+    east, north, up = project_ecef_to_enu(
+        target_ecef[0],
+        target_ecef[1],
+        target_ecef[2],
+        ground_lat_deg,
+        ground_lon_deg,
+        ground_alt_m,
+    )
+    return math.degrees(math.atan2(up, math.hypot(east, north)))
 
 
 def load_run_params(connection: sqlite3.Connection) -> dict[str, str]:
@@ -334,6 +341,78 @@ def satellite_id_from_index(index: int) -> str:
     return f"sat-{index + 1:02d}"
 
 
+def require_endpoint_nodes(
+    ground_nodes: list[GroundNodeConfig],
+    endpoint_ids: list[str],
+) -> dict[str, GroundNodeConfig]:
+    nodes_by_label = {node.native_label: node for node in ground_nodes}
+    missing = [endpoint_id for endpoint_id in endpoint_ids if endpoint_id not in nodes_by_label]
+    if missing:
+        raise ProducerError(
+            "Could not map endpoint ids to configured ground nodes in the reference scenario: "
+            + ", ".join(missing)
+        )
+    return {endpoint_id: nodes_by_label[endpoint_id] for endpoint_id in endpoint_ids}
+
+
+def derive_active_path(
+    endpoint_nodes: dict[str, GroundNodeConfig],
+    endpoint_ids: list[str],
+    satellites_ecef: list[tuple[int, str, tuple[float, float, float]]],
+    round_digits: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    candidates: list[tuple[float, float, int, str, dict[str, float]]] = []
+    for native_index, satellite_id, satellite_ecef in satellites_ecef:
+        endpoint_elevations = {
+            endpoint_id: elevation_deg_to_target(
+                endpoint_nodes[endpoint_id].latitude_deg,
+                endpoint_nodes[endpoint_id].longitude_deg,
+                endpoint_nodes[endpoint_id].altitude_m,
+                satellite_ecef,
+            )
+            for endpoint_id in endpoint_ids
+        }
+        min_elevation = min(endpoint_elevations.values())
+        if min_elevation <= ACTIVE_PATH_MIN_ELEVATION_DEG:
+            continue
+        candidates.append(
+            (
+                min_elevation,
+                sum(endpoint_elevations.values()),
+                -native_index,
+                satellite_id,
+                endpoint_elevations,
+            )
+        )
+
+    if not candidates:
+        endpoint_summary = ", ".join(endpoint_ids)
+        raise ProducerError(
+            "Could not derive a common single-hop activePath from producer truth: "
+            f"no satellite stayed above {ACTIVE_PATH_MIN_ELEVATION_DEG:.1f} deg elevation for both endpoints "
+            f"({endpoint_summary})."
+        )
+
+    min_elevation, _sum_elevation, _tie_breaker, satellite_id, endpoint_elevations = max(
+        candidates,
+        key=lambda item: (item[0], item[1], item[2]),
+    )
+    return (
+        {
+            "endpointIds": endpoint_ids,
+            "satelliteId": satellite_id,
+        },
+        {
+            "satelliteId": satellite_id,
+            "minCommonElevationDeg": round(min_elevation, round_digits),
+            "endpointElevationsDeg": {
+                endpoint_id: round(endpoint_elevations[endpoint_id], round_digits)
+                for endpoint_id in endpoint_ids
+            },
+        },
+    )
+
+
 def build_export_metadata(
     vector_db: Path,
     tle_file: Path,
@@ -344,6 +423,7 @@ def build_export_metadata(
     ground_nodes: list[GroundNodeConfig],
     satellite_modules: list[tuple[int, str]],
     round_digits: int,
+    active_path_summary: dict[str, Any],
 ) -> dict[str, Any]:
     ground_node_entries = []
     for node in ground_nodes:
@@ -400,6 +480,7 @@ def build_export_metadata(
             }
             for native_index, module_name in satellite_modules
         ],
+        "activePath": active_path_summary,
     }
 
 
@@ -413,6 +494,8 @@ def command_export(args: argparse.Namespace) -> int:
         raise ProducerError(f"Result database is missing: {vector_db}")
     if not tle_file.is_file():
         raise ProducerError(f"TLE file is missing: {tle_file}")
+    if len(args.endpoint_ids) != 2 or len(set(args.endpoint_ids)) != 2:
+        raise ProducerError("Reference producer activePath export expects exactly two distinct endpoint ids.")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     frames_dir = output_dir / "frames"
@@ -424,6 +507,7 @@ def command_export(args: argparse.Namespace) -> int:
     with sqlite3.connect(vector_db) as connection:
         run_params = load_run_params(connection)
         ground_nodes = load_ground_nodes(scenario_assignments or run_params)
+        endpoint_nodes = require_endpoint_nodes(ground_nodes, args.endpoint_ids)
         satellite_modules = discover_satellite_modules(connection)
 
         if len(satellite_modules) != args.satellite_count:
@@ -477,28 +561,50 @@ def command_export(args: argparse.Namespace) -> int:
     }
     json_dump(output_dir / "manifest.json", manifest)
 
+    active_path_frame_count = 0
+    active_path_satellite_ids: list[str] = []
+    min_common_elevation_deg: float | None = None
+    max_common_elevation_deg: float | None = None
+
     for offset, simtime_raw in enumerate(reference_timestamps):
         frame_id = first_frame_id + offset
         sim_time_sec = simtime_raw / SIMTIME_RAW_PER_SEC
+        julian_date = base_julian_date + sim_time_sec / 86400.0
         satellites = []
+        satellites_ecef: list[tuple[int, str, tuple[float, float, float]]] = []
         for native_index, _module_name in satellite_modules:
             xs, ys, zs = series_by_satellite[native_index]
-            enu = project_eci_to_enu(
-                xs[offset],
-                ys[offset],
-                zs[offset],
-                sim_time_sec,
-                base_julian_date,
-                ANCHOR_LAT_DEG,
-                ANCHOR_LON_DEG,
-                ANCHOR_ALT_M,
-            )
+            satellite_id = satellite_id_from_index(native_index)
+            ecef = eci_to_ecef(xs[offset], ys[offset], zs[offset], julian_date)
+            enu = project_ecef_to_enu(ecef[0], ecef[1], ecef[2], ANCHOR_LAT_DEG, ANCHOR_LON_DEG, ANCHOR_ALT_M)
+            satellites_ecef.append((native_index, satellite_id, ecef))
             satellites.append(
                 {
-                    "id": satellite_id_from_index(native_index),
+                    "id": satellite_id,
                     "positionEnuM": round_coord(enu, args.round_digits),
                 }
             )
+
+        active_path, active_path_details = derive_active_path(
+            endpoint_nodes=endpoint_nodes,
+            endpoint_ids=args.endpoint_ids,
+            satellites_ecef=satellites_ecef,
+            round_digits=args.round_digits,
+        )
+        active_path_frame_count += 1
+        if active_path["satelliteId"] not in active_path_satellite_ids:
+            active_path_satellite_ids.append(active_path["satelliteId"])
+        min_common_elevation = active_path_details["minCommonElevationDeg"]
+        min_common_elevation_deg = (
+            min_common_elevation
+            if min_common_elevation_deg is None
+            else min(min_common_elevation_deg, min_common_elevation)
+        )
+        max_common_elevation_deg = (
+            min_common_elevation
+            if max_common_elevation_deg is None
+            else max(max_common_elevation_deg, min_common_elevation)
+        )
 
         frame_payload = {
             "schemaVersion": FRAME_SCHEMA_VERSION,
@@ -507,10 +613,22 @@ def command_export(args: argparse.Namespace) -> int:
             "frameId": frame_id,
             "simTimeSec": round(sim_time_sec, args.round_digits),
             "satellites": satellites,
+            "activePath": active_path,
         }
         json_dump(frames_dir / f"frame-{frame_id:0{args.frame_file_digits}d}.json", frame_payload)
 
     if metadata_out is not None:
+        active_path_summary = {
+            "requiredInEveryFrame": True,
+            "selectionMethod": ACTIVE_PATH_SELECTION_METHOD,
+            "visibilityThresholdDeg": ACTIVE_PATH_MIN_ELEVATION_DEG,
+            "endpointIds": args.endpoint_ids,
+            "frameCountWithActivePath": active_path_frame_count,
+            "frameCountWithoutActivePath": len(reference_timestamps) - active_path_frame_count,
+            "distinctSatelliteIds": active_path_satellite_ids,
+            "minCommonElevationDeg": min_common_elevation_deg,
+            "maxCommonElevationDeg": max_common_elevation_deg,
+        }
         metadata = build_export_metadata(
             vector_db=vector_db,
             tle_file=tle_file,
@@ -521,6 +639,7 @@ def command_export(args: argparse.Namespace) -> int:
             ground_nodes=ground_nodes,
             satellite_modules=satellite_modules,
             round_digits=args.round_digits,
+            active_path_summary=active_path_summary,
         )
         json_dump(metadata_out, metadata)
 
@@ -585,12 +704,16 @@ def validate_frames(manifest: dict[str, Any], dataset_dir: Path) -> tuple[list[s
     frame_digits = manifest["frameFileDigits"]
     frame_dir = dataset_dir / manifest["frameDirectory"]
     expected_satellite_count = manifest["satelliteCount"]
+    expected_endpoint_ids = manifest["endpointIds"]
     satellite_ids_reference: list[str] | None = None
+    active_path_satellite_ids: list[str] = []
     frame_metrics: dict[str, Any] = {
         "frameCount": 0,
         "firstSimTimeSec": None,
         "lastSimTimeSec": None,
         "satelliteIds": [],
+        "activePathFrameCount": 0,
+        "activePathSatelliteIds": [],
     }
 
     for frame_id in range(first_frame_id, last_frame_id + 1):
@@ -639,12 +762,34 @@ def validate_frames(manifest: dict[str, Any], dataset_dir: Path) -> tuple[list[s
         elif satellite_ids_reference != current_satellite_ids:
             errors.append(f"{frame_path.name}: satellite id ordering is not stable across frames")
 
+        active_path = frame.get("activePath")
+        if not isinstance(active_path, dict):
+            errors.append(f"{frame_path.name}: activePath must be an object")
+        else:
+            endpoint_ids = active_path.get("endpointIds")
+            satellite_id = active_path.get("satelliteId")
+            if endpoint_ids != expected_endpoint_ids:
+                errors.append(
+                    f"{frame_path.name}: activePath.endpointIds expected {expected_endpoint_ids!r} but found {endpoint_ids!r}"
+                )
+            if not isinstance(satellite_id, str):
+                errors.append(f"{frame_path.name}: activePath.satelliteId must be a string")
+            elif satellite_id not in current_satellite_ids:
+                errors.append(
+                    f"{frame_path.name}: activePath.satelliteId {satellite_id!r} is not present in this frame's satellites[] snapshot"
+                )
+            else:
+                frame_metrics["activePathFrameCount"] += 1
+                if satellite_id not in active_path_satellite_ids:
+                    active_path_satellite_ids.append(satellite_id)
+
         frame_metrics["frameCount"] += 1
         frame_metrics["firstSimTimeSec"] = frame["simTimeSec"] if frame_metrics["firstSimTimeSec"] is None else frame_metrics["firstSimTimeSec"]
         frame_metrics["lastSimTimeSec"] = frame["simTimeSec"]
 
     if satellite_ids_reference is not None:
         frame_metrics["satelliteIds"] = satellite_ids_reference
+    frame_metrics["activePathSatelliteIds"] = active_path_satellite_ids
 
     return errors, frame_metrics
 
@@ -785,6 +930,13 @@ def command_validate(args: argparse.Namespace) -> int:
             "endpointIds": manifest.get("endpointIds"),
         },
         "frameMetrics": frame_metrics,
+        "activePathContract": {
+            "required": True,
+            "selectionMethod": ACTIVE_PATH_SELECTION_METHOD,
+            "endpointIds": manifest.get("endpointIds"),
+            "frameCountWithActivePath": frame_metrics.get("activePathFrameCount"),
+            "satelliteIds": frame_metrics.get("activePathSatelliteIds"),
+        },
         "mappingValidation": {
             "method": "Read cg[0]/cg[1] identity and geodetic placement from the generated scenario ini, then confirm the same native ground modules were instantiated with mobility vectors and project their configured positions into the frozen ntpu-local-enu-v1 anchor.",
             "toleranceM": args.mapping_tolerance_m,

@@ -189,11 +189,16 @@ cd "${PROJECT_ROOT}"
 - `tools/run_reference_producer.sh`
   - 把 reference scenario proof、export 與 validation 收斂成可重跑路徑
 - `tools/reference_producer.py`
-  - 對 frozen replay package contract 做 export-side guardrail 與 endpoint mapping validation
+  - 對 frozen replay package contract 做 export-side guardrail、endpoint mapping validation，以及最小 `activePath` truth/export
 
 補充：
 
 - 這條線的 generated replay dataset、raw `.vec`/`.sca` 與 validation report 都是 workspace-only output，不是交付 repo 內容
+- 目前 golden replay dataset 的 frame 會帶最小：
+  - `activePath.endpointIds`
+  - `activePath.satelliteId`
+- 這個 `activePath` 不是 viewer 假資料；它是用 producer 端 mobility truth 推導出「同時對兩個 endpoint 可見、且共同最小 elevation 最高」的單跳 relay satellite
+- 目前 reference run 只模擬到 `60s`，而模板中的顯式 app traffic 從 `180s` 才開始，因此這一輪不能把 packet/throughput 當成可用 path truth
 - 若 workspace 因搬移目錄導致 `omnetpp-5.5.1/Makefile.inc` 或 `configure.user` 殘留舊 root path，`run_reference_producer.sh` 會在本機 workspace 內自動修補；這是 control-layer 治理，不代表 vendor tree 變成交付內容
 - 具體 runbook 與 patch/workspace 治理說明見 `docs/reference-producer.md`
 
