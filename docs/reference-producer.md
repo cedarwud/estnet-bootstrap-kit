@@ -1,6 +1,6 @@
 # Reference Producer Runbook
 
-這份文件描述 `feature/reference-producer` 目前建立的最小 producer/exporter 路線。它的目標不是把 viewer 綁回 OMNeT++ runtime，而是讓 bootstrap kit 可以獨立產出與驗證 frozen replay package。
+這份文件描述目前已收斂到 `main` 的最小 producer/exporter 路線。它的目標不是把 viewer 綁回 OMNeT++ runtime，而是讓 bootstrap kit 可以獨立產出與驗證 frozen replay package。
 
 ## Goal
 

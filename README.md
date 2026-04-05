@@ -178,7 +178,7 @@ cd "${PROJECT_ROOT}"
 
 ## Reference Producer
 
-`feature/reference-producer` 這條線的責任是把 `estnet-bootstrap-kit` 變成 reference producer proving ground，而不是把 viewer 綁回 producer runtime。
+`main` 目前已吸收第一階段 reference producer surface；它的責任是把 `estnet-bootstrap-kit` 變成 reference producer proving ground，而不是把 viewer 綁回 producer runtime。
 
 目前控制面已經補上：
 
