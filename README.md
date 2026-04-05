@@ -94,6 +94,29 @@ cd "${PROJECT_ROOT}"
     - `./tools/run_stage.sh 40`
     - `./tools/run_stage.sh --force 50`
 
+- `./tools/run_reference_producer.sh`
+  - reference producer / exporter 的 control-layer 入口
+  - 會修復 moved-workspace metadata、重新生成 `activate_env.sh`、build `ESTNeT`/`estnet-template` release target、跑 `18 sat walker + 2 endpoints` reference scenario，並匯出/驗證 frozen replay package contract
+  - 預設輸出會放在：
+    - `state/reference-producer/runs/<run-id>/raw/`
+    - `state/reference-producer/runs/<run-id>/dataset/<dataset-id>/`
+    - `state/reference-producer/runs/<run-id>/reports/`
+  - exporter 會自動偵測 raw 目錄下真正承載 `vectorData` 的 SQLite result DB；在目前 baseline 下，這可能是 `.sca` 而不是獨立 `.vec`
+  - 用法：
+    - `./tools/run_reference_producer.sh`
+    - `./tools/run_reference_producer.sh prepare`
+    - `./tools/run_reference_producer.sh run`
+    - `./tools/run_reference_producer.sh export`
+    - `./tools/run_reference_producer.sh validate`
+    - `./tools/run_reference_producer.sh --sim-time-limit 120s --frame-step 1s`
+
+- `./tools/reference_producer.py`
+  - `run_reference_producer.sh` 背後使用的 exporter / validator
+  - 平常建議透過 shell wrapper 呼叫；若要局部重跑 export 或 contract validation，才直接使用
+  - 用法：
+    - `python3 ./tools/reference_producer.py export ...`
+    - `python3 ./tools/reference_producer.py validate ...`
+
 ### Generated / Internal Scripts
 
 - `./activate_env.sh`
@@ -152,6 +175,27 @@ cd "${PROJECT_ROOT}"
 
 - `90`
   - build 並掛接 OMNeT++ IDE payload
+
+## Reference Producer
+
+`feature/reference-producer` 這條線的責任是把 `estnet-bootstrap-kit` 變成 reference producer proving ground，而不是把 viewer 綁回 producer runtime。
+
+目前控制面已經補上：
+
+- `scripts/70_activate_env.sh`
+  - 生成的 `activate_env.sh` 現在會同時暴露 OMNeT++ / INET / `ESTNeT` / OSG / osgEarth runtime library 路徑
+- `verify_versions.sh`
+  - runtime link 檢查已改成讀真正的 `estnet-template` release binary
+- `tools/run_reference_producer.sh`
+  - 把 reference scenario proof、export 與 validation 收斂成可重跑路徑
+- `tools/reference_producer.py`
+  - 對 frozen replay package contract 做 export-side guardrail 與 endpoint mapping validation
+
+補充：
+
+- 這條線的 generated replay dataset、raw `.vec`/`.sca` 與 validation report 都是 workspace-only output，不是交付 repo 內容
+- 若 workspace 因搬移目錄導致 `omnetpp-5.5.1/Makefile.inc` 或 `configure.user` 殘留舊 root path，`run_reference_producer.sh` 會在本機 workspace 內自動修補；這是 control-layer 治理，不代表 vendor tree 變成交付內容
+- 具體 runbook 與 patch/workspace 治理說明見 `docs/reference-producer.md`
 
 ## Environment Detection
 

@@ -62,7 +62,7 @@ append_summary "osg_libdir_suffix=${OSG_LIBDIR_SUFFIX}"
 append_summary "osgearth_libdir_suffix=${OSGEARTH_LIBDIR_SUFFIX}"
 append_summary "osgearth_data_dir=${OSGEARTH_DATA_DIR}"
 append_summary "python_shim_dir=${PYTHON_SHIM_DIR}"
-append_summary "activation_goal=source OMNeT++ setenv, source INET setenv, preserve OSG/osgEarth prefixes"
+append_summary "activation_goal=source OMNeT++ setenv, source INET setenv, preserve OSG/osgEarth prefixes, and expose producer runtime libraries"
 
 set_checkpoint "generate" "writing unified activation script"
 cat > "${ACTIVATE_ENV_FILE}" <<EOF
@@ -98,13 +98,31 @@ export ESTNET_TEMPLATE_ROOT="\${ESTNET_TEMPLATE_DIR}"
 export OPENSCENEGRAPH_PREFIX="\${OPENSCENEGRAPH_PREFIX}"
 export OSGEARTH_PREFIX="\${OSGEARTH_27A_PREFIX}"
 
+_activate_env_prepend_path_var() {
+    local var_name="\$1"
+    local entry="\$2"
+    local current_value="\${!var_name:-}"
+
+    if [[ -z "\${entry}" || ! -d "\${entry}" ]]; then
+        return 0
+    fi
+
+    case ":\${current_value}:" in
+        *:"\${entry}":*)
+            return 0
+            ;;
+    esac
+
+    if [[ -n "\${current_value}" ]]; then
+        printf -v "\${var_name}" '%s:%s' "\${entry}" "\${current_value}"
+    else
+        printf -v "\${var_name}" '%s' "\${entry}"
+    fi
+    export "\${var_name}"
+}
+
 if [[ -d "\${THIRD_PARTY_INSTALL_DIR}/toolchain-shims/bin" ]]; then
     export PATH="\${THIRD_PARTY_INSTALL_DIR}/toolchain-shims/bin:\$PATH"
-fi
-
-export LD_LIBRARY_PATH="\${OSGEARTH_PREFIX}${OSGEARTH_LIBDIR_SUFFIX}:\${OPENSCENEGRAPH_PREFIX}${OSG_LIBDIR_SUFFIX}\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}"
-if [[ -d "\${OSGEARTH_PREFIX}/data" ]]; then
-    export OSG_FILE_PATH="\${OSGEARTH_PREFIX}/data\${OSG_FILE_PATH:+:\${OSG_FILE_PATH}}"
 fi
 
 cd "\${OMNETPP_DIR}"
@@ -113,14 +131,26 @@ cd "\${INET_DIR}"
 . ./setenv -f >/dev/null
 cd "\$_activate_env_prev_pwd"
 
+_activate_env_prepend_path_var LD_LIBRARY_PATH "\${OSGEARTH_PREFIX}${OSGEARTH_LIBDIR_SUFFIX}"
+_activate_env_prepend_path_var LD_LIBRARY_PATH "\${OPENSCENEGRAPH_PREFIX}${OSG_LIBDIR_SUFFIX}"
+_activate_env_prepend_path_var LD_LIBRARY_PATH "\${ESTNET_DIR}/out/gcc-release/src"
+_activate_env_prepend_path_var LD_LIBRARY_PATH "\${ESTNET_DIR}/out/gcc-debug/src"
+_activate_env_prepend_path_var LD_LIBRARY_PATH "\${INET_DIR}/src"
+_activate_env_prepend_path_var LD_LIBRARY_PATH "\${OMNETPP_DIR}/lib"
+
+if [[ -d "\${OSGEARTH_PREFIX}/data" ]]; then
+    _activate_env_prepend_path_var OSG_FILE_PATH "\${OSGEARTH_PREFIX}/data"
+fi
+
 unset _activate_env_root
 unset _activate_env_prev_pwd
+unset -f _activate_env_prepend_path_var
 EOF
 
 chmod +x "${ACTIVATE_ENV_FILE}"
 
 set_checkpoint "validate" "verifying unified activation script"
-if ! bash -lc 'source "'"${ACTIVATE_ENV_FILE}"'" && test "${OMNETPP_ROOT}" = "'"${OMNETPP_DIR}"'" && test "${INET_ROOT}" = "'"${INET_DIR}"'" && command -v omnetpp >/dev/null && command -v inet >/dev/null && test -r "'"${OSGEARTH_DATA_DIR}"'/moon_1024x512.jpg" && case ":${OSG_FILE_PATH:-}:" in *:"'"${OSGEARTH_DATA_DIR}"'":*) true ;; *) false ;; esac'; then
+if ! bash -lc 'source "'"${ACTIVATE_ENV_FILE}"'" && test "${OMNETPP_ROOT}" = "'"${OMNETPP_DIR}"'" && test "${INET_ROOT}" = "'"${INET_DIR}"'" && command -v omnetpp >/dev/null && command -v inet >/dev/null && test -r "'"${OSGEARTH_DATA_DIR}"'/moon_1024x512.jpg" && case ":${OSG_FILE_PATH:-}:" in *:"'"${OSGEARTH_DATA_DIR}"'":*) true ;; *) false ;; esac && case ":${LD_LIBRARY_PATH:-}:" in *:"'"${OMNETPP_DIR}"'/lib":*) true ;; *) false ;; esac && case ":${LD_LIBRARY_PATH:-}:" in *:"'"${INET_DIR}"'/src":*) true ;; *) false ;; esac'; then
     stage_mark_failure "Generated activation script failed validation. Inspect ${ACTIVATE_ENV_FILE}."
 fi
 

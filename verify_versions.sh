@@ -36,6 +36,35 @@ record_check() {
     SUMMARY_ROWS="${SUMMARY_ROWS}| ${name} | ${status} | ${details} |\n"
 }
 
+normalize_workspace_path() {
+    local raw_path="$1"
+    if [[ -z "${raw_path}" ]]; then
+        return 0
+    fi
+
+    python3 - "${raw_path}" "${PROJECT_ROOT}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+raw_path = sys.argv[1]
+project_root = str(Path(sys.argv[2]).resolve())
+
+if Path(raw_path).exists():
+    print(raw_path)
+    raise SystemExit(0)
+
+updated = raw_path
+for suffix in ("/third_party/install", "/omnetpp-5.5.1", "/inet", "/estnet", "/estnet-template"):
+    match = re.search(r"(/[^ \n\r\t:\"']+?)" + re.escape(suffix), raw_path)
+    if match:
+        updated = raw_path.replace(match.group(1), project_root, 1)
+        break
+
+print(updated)
+PY
+}
+
 git_check() {
     local label="$1"
     local repo_dir="$2"
@@ -125,6 +154,8 @@ VIRT_KIND="$(detect_virtualization || true)"
 ACTIVE_OSGEARTH_METHOD="$(summary_value "osgearth_method" "${STATE_DIR}/40.summary")"
 ACTIVE_OSGEARTH_PREFIX="$(summary_value "osgearth_prefix" "${STATE_DIR}/40.summary")"
 ACTIVE_OSGEARTH_LIBDIR="$(summary_value "osgearth_libdir" "${STATE_DIR}/40.summary")"
+ACTIVE_OSGEARTH_PREFIX="$(normalize_workspace_path "${ACTIVE_OSGEARTH_PREFIX}")"
+ACTIVE_OSGEARTH_LIBDIR="$(normalize_workspace_path "${ACTIVE_OSGEARTH_LIBDIR}")"
 if [[ -z "${ACTIVE_OSGEARTH_METHOD}" ]]; then
     if [[ -d "${OSGEARTH_27A_PREFIX}" ]]; then
         ACTIVE_OSGEARTH_METHOD="a"
@@ -158,6 +189,8 @@ append "| osgEarth | \`${OSGEARTH_TARGET_SERIES}\` | \`${OSGEARTH_REF_METHOD_A}\
 append ""
 append "## Source Repository Verification"
 append ""
+
+repair_worktree_metadata "${INET_SOURCE_DIR}" "${INET_DIR}" "inet" >/dev/null 2>&1 || true
 
 git_check "OMNeT++" "${OMNETPP_DIR}" "${OMNETPP_COMMIT}" "${OMNETPP_REF}"
 git_check "INET" "${INET_DIR}" "${INET_COMMIT}" "${INET_REF}"
@@ -254,7 +287,7 @@ append "## Runtime Link Verification"
 append ""
 
 QTENV_OSG_LIB="${OMNETPP_DIR}/lib/liboppqtenv-osg.so"
-ESTNET_TEMPLATE_BIN="${ESTNET_TEMPLATE_DIR}/out/gcc-release/src/estnet"
+ESTNET_TEMPLATE_BIN="${ESTNET_TEMPLATE_DIR}/out/gcc-release/src/estnet-template"
 
 if [[ -f "${PROJECT_ROOT}/activate_env.sh" && -f "${QTENV_OSG_LIB}" ]]; then
     QTV_LINKS="$(ldd_capture "${QTENV_OSG_LIB}" 'osgEarth|osgDB|osgViewer|OpenThreads|osg\.so|osgUtil')"
