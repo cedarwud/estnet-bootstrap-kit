@@ -178,7 +178,7 @@ cd "${PROJECT_ROOT}"
 
 ## Reference Producer
 
-`main` 目前已吸收第一階段 reference producer surface；它的責任是把 `estnet-bootstrap-kit` 變成 reference producer proving ground，而不是把 viewer 綁回 producer runtime。
+`main` 現在只保留 bootstrap/control-layer baseline。第一階段 reference producer surface 與後續 orbit export follow-on work 由 `feature/reference-producer` 承接；它的責任是把 `estnet-bootstrap-kit` 變成 reference producer proving ground，而不是把 viewer 綁回 producer runtime。
 
 目前控制面已經補上：
 
